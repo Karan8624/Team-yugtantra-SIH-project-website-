@@ -109,6 +109,13 @@ export const STATION_LABELS: Record<StationId, string> = {
 // Task-assignable stations (excludes HOME, which is a parking point).
 export const TASK_STATIONS: StationId[] = ["STN-A", "STN-B", "STN-C", "CHG"];
 
+// Reverse of STATION_LABELS — the Create Task form stores the human label
+// ("Station A"), so dispatching a task needs to look the StationId back up
+// to actually route a robot there.
+const LABEL_TO_STATION: Partial<Record<string, StationId>> = Object.fromEntries(
+  (Object.entries(STATION_LABELS) as [StationId, string][]).map(([id, label]) => [label, id])
+) as Partial<Record<string, StationId>>;
+
 export const STATION_POS: Record<StationId, { x: number; y: number }> = {
   "STN-A": { x: 205, y: 100 },
   "STN-B": { x: 455, y: 100 },
@@ -597,12 +604,42 @@ export function TelemetryProvider({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
-  const dispatchTask = useCallback((task: Omit<TaskEntry, "id" | "status">) => {
-    setState((s) => ({
-      ...s,
-      tasks: [...s.tasks, { ...task, id: `t-${Date.now()}`, status: "Queued" }],
-    }));
-  }, []);
+  // Dispatching a task only actually moves a robot if it was assigned to
+  // one AND the from/to stations are recognized — otherwise it just sits
+  // in the queue (there's no auto-assignment engine here; "Unassigned"
+  // tasks are a placeholder for a human/dispatcher to claim later).
+  const dispatchTask = useCallback(
+    (task: Omit<TaskEntry, "id" | "status">) => {
+      const id = `t-${Date.now()}`;
+      const fromStation = LABEL_TO_STATION[task.from];
+      const toStation = LABEL_TO_STATION[task.to];
+      const robotId = task.assignedRobotId;
+      const canRunNow = Boolean(robotId && fromStation && toStation);
+
+      setState((s) => ({
+        ...s,
+        tasks: [...s.tasks, { ...task, id, status: canRunNow ? "In Progress" : "Queued" }],
+      }));
+
+      if (canRunNow && robotId && fromStation && toStation) {
+        // Point the assigned robot at this task's route and kick its
+        // mission sequence off from the "Task Assigned" step — this is
+        // what makes the floor plan actually move and the Activity Log
+        // actually fill in once you hit "Dispatch Task". Note: if that
+        // robot was already mid-mission, this redirects it — assigning a
+        // new task always takes priority over whatever it was doing.
+        setState((s) =>
+          applyStepToState(
+            { ...s, robots: s.robots.map((r) => (r.id === robotId ? { ...r, route: { from: fromStation, to: toStation } } : r)) },
+            robotId,
+            MISSION_STEPS.indexOf("task")
+          )
+        );
+        startMission(robotId);
+      }
+    },
+    [startMission]
+  );
 
   const acknowledgeAlert = useCallback((id: string) => {
     setState((s) => ({ ...s, alerts: s.alerts.map((a) => (a.id === id ? { ...a, active: a.active } : a)) }));
